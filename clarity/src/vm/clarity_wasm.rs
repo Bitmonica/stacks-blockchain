@@ -40,6 +40,12 @@ trait ClarityWasmContext {
         value: Value,
         variable_descriptor: &DataVariableMetadata,
     ) -> Result<ValueResult, Error>;
+    fn print(
+        &mut self,
+        contract_identifier: &QualifiedContractIdentifier,
+        value: Value,
+        variable_descriptor: &DataVariableMetadata,
+    ) -> Result<(), Error>;
     fn get_tx_sender(&self) -> Result<PrincipalData, Error>;
     fn get_contract_caller(&self) -> Result<PrincipalData, Error>;
     fn get_tx_sponsor(&self) -> Result<Option<PrincipalData>, Error>;
@@ -107,6 +113,15 @@ impl ClarityWasmContext for ClarityWasmRunContext<'_, '_, '_> {
             value,
             variable_descriptor,
         )
+    }
+
+    fn print(
+        &mut self,
+        _contract_identifier: &QualifiedContractIdentifier,
+        value: Value,
+        _variable_descriptor: &DataVariableMetadata,
+    ) -> Result<(), Error> {
+        self.env.register_print_event(&value)
     }
 
     fn get_tx_sender(&self) -> Result<PrincipalData, Error> {
@@ -270,6 +285,16 @@ impl ClarityWasmContext for ClarityWasmInitContext<'_, '_> {
         )
     }
 
+    fn print(
+        &mut self,
+        _contract_identifier: &QualifiedContractIdentifier,
+        _value: Value,
+        _variable_descriptor: &DataVariableMetadata,
+    ) -> Result<(), Error> {
+        // TODO: how to access env.register_print_event(&value) from here?
+        todo!()
+    }
+
     fn get_tx_sender(&self) -> Result<PrincipalData, Error> {
         Ok(self.sender.clone())
     }
@@ -366,6 +391,7 @@ pub fn initialize_contract(
     link_define_variable_fn(&mut linker)?;
     link_get_variable_fn(&mut linker)?;
     link_set_variable_fn(&mut linker)?;
+    link_print_fn(&mut linker)?;
     link_tx_sender_fn(&mut linker)?;
     link_contract_caller_fn(&mut linker)?;
     link_tx_sponsor_fn(&mut linker)?;
@@ -426,6 +452,7 @@ pub fn call_function<'a, 'b, 'c>(
     link_define_variable_fn_error(&mut linker)?;
     link_get_variable_fn(&mut linker)?;
     link_set_variable_fn(&mut linker)?;
+    link_print_fn(&mut linker)?;
     link_tx_sender_fn(&mut linker)?;
     link_contract_caller_fn(&mut linker)?;
     link_tx_sponsor_fn(&mut linker)?;
@@ -876,6 +903,38 @@ where
         })
 }
 
+/// Link host interface function, `print`, into the Wasm module.
+/// This function is called for all contract print statements (`print`).
+fn link_print_fn<T>(linker: &mut Linker<T>) -> Result<(), Error>
+where
+    T: ClarityWasmContext,
+{
+    linker
+        .func_wrap(
+            "clarity",
+            "print",
+            |mut caller: Caller<'_, T>, value_offset: i32, value_length: i32| {
+                // TODO: Include this cost
+
+                // Read in the bytes from the Wasm memory
+                let bytes = read_bytes_from_wasm(&mut caller, value_offset, value_length)?;
+
+                // TODO: the print function needs to generate code to return SIP-005 serialized data so it can be parsed here
+                // let clarity_val = Value::try_from(bytes.clone())?;
+                // let clarity_val_type = TypeSignature::type_of(clarity_val);
+
+                // Print bytes as hex string
+                println!(
+                    "Contract print: {:?}",
+                    stacks_common::util::hash::to_hex(&bytes)
+                );
+                Ok(())
+            },
+        )
+        .map(|_| ())
+        .map_err(|e| Error::Wasm(WasmError::UnableToLinkHostFunction("print".to_string(), e)))
+}
+
 /// Link host interface function, `tx_sender`, into the Wasm module.
 /// This function is called for use of the builtin variable, `tx-sender`.
 fn link_tx_sender_fn<T>(linker: &mut Linker<T>) -> Result<(), Error>
@@ -1219,6 +1278,28 @@ where
         .read(caller, offset as usize, &mut buffer)
         .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
     String::from_utf8(buffer).map_err(|e| Error::Wasm(WasmError::UnableToReadIdentifier(e)))
+}
+
+/// Read a bytes from the WASM memory at `offset` with `length`
+fn read_bytes_from_wasm<T>(
+    caller: &mut Caller<'_, T>,
+    offset: i32,
+    length: i32,
+) -> Result<Vec<u8>, Error>
+where
+    T: ClarityWasmContext,
+{
+    // Get the memory from the caller
+    let memory = caller
+        .get_export("memory")
+        .and_then(|export| export.into_memory())
+        .ok_or(Error::Wasm(WasmError::MemoryNotFound))?;
+
+    let mut buffer: Vec<u8> = vec![0; length as usize];
+    memory
+        .read(caller, offset as usize, &mut buffer)
+        .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+    Ok(buffer)
 }
 
 /// Read a value from the WASM memory at `offset` with `length` given the provided
